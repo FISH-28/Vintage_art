@@ -96,29 +96,48 @@ module vintageart::marketplace {
     }
 
     // Function to place a bid in the auction
-    public fun place_bid(auction: &mut Auction, bid_amount: Coin<SUI>, clock: &Clock, ctx: &mut TxContext): BidReceipt {
-        let current_time = clock::timestamp_ms(clock);
-        assert!(auction.auction_end_time > current_time, AUCTION_ENDED);
-        assert!(auction.status == 0, AUCTION_ENDED);
+public fun place_bid(
+    auction: &mut Auction, 
+    bid_amount: Coin<SUI>, 
+    clock: &Clock, 
+    ctx: &mut TxContext
+): BidReceipt {
+    let current_time = clock::timestamp_ms(clock);
+    assert!(auction.auction_end_time > current_time, AUCTION_ENDED);
+    assert!(auction.status == 0, AUCTION_ENDED);
 
-        let bid_value = coin::value(&bid_amount);
-        assert!(bid_value > auction.top_bid, BID_TOO_LOW);
+    let bid_value = coin::value(&bid_amount);
+    assert!(bid_value > auction.top_bid, BID_TOO_LOW);
 
-        let bid_balance = coin::into_balance(bid_amount);
-        balance::join(&mut auction.bid_pool, bid_balance);
+    let bid_balance = coin::into_balance(bid_amount);
 
-        auction.top_bid = bid_value;
-        auction.top_bidder = option::some(tx_context::sender(ctx));
+    // If there's a previous top bidder, refund their bid
+    if (option::is_some(&auction.top_bidder)) {
+        let prev_bidder = option::extract(&mut auction.top_bidder);
+        let refund_amount = auction.top_bid;
 
-        let auction_id = object::uid_to_inner(&auction.id);
-        let receipt = BidReceipt {
-            id: object::new(ctx),
-            auction_id,
-            amount: bid_value,
-        };
+        // Refund the previous top bidder's amount
+        let refund_coin = coin::extract_from_balance(&mut auction.bid_pool, refund_amount, ctx);
+        transfer::public_transfer(refund_coin, prev_bidder);
+    };
 
-        receipt
-    }
+    // Join the new bid amount into the bid pool
+    balance::join(&mut auction.bid_pool, bid_balance);
+
+    // Update the auction's top bid and top bidder
+    auction.top_bid = bid_value;
+    auction.top_bidder = option::some(tx_context::sender(ctx));
+
+    let auction_id = object::uid_to_inner(&auction.id);
+    let receipt = BidReceipt {
+        id: object::new(ctx),
+        auction_id,
+        amount: bid_value,
+    };
+
+    receipt
+}
+
 
     // Function to finalize the auction and transfer the item to the highest bidder
     public fun finalize_auction(item: VintageItem, auction: &mut Auction, token: u64, clock: &Clock, ctx: &mut TxContext): Coin<SUI> {
@@ -177,75 +196,180 @@ module vintageart::marketplace {
     #[test_only] const BIDDER2_ADDR: address = @0xB;
 
     #[test]
-    fun test_vintage_auction_with_2fa() {
-        let ts = ts::begin(@0x0);
-        let clock = clock::create_for_testing(ts::ctx(&mut ts));
+fun test_vintage_auction_with_2fa() {
+    let ts = ts::begin(@0x0);
+    let clock = clock::create_for_testing(ts::ctx(&mut ts));
 
-        {   
-            ts::next_tx(&mut ts, SELLER_ADDR);
+    // Scenario 1: Create an auction and add 2FA token
+    {
+        ts::next_tx(&mut ts, SELLER_ADDR);
 
-            let title = b"Antique Pocket Watch";
-            let description = b"1988 Old Man Edition Watch";
-            let minimum_bid: u64 = 5;
+        let title = b"Antique Pocket Watch";
+        let description = b"1988 Old Man Edition Watch";
+        let minimum_bid: u64 = 5;
 
-            let item = create_vintage_item(title, description, minimum_bid, &clock, ts::ctx(&mut ts));
-            transfer::public_transfer(item, SELLER_ADDR);
-        };
+        let item = create_vintage_item(title, description, minimum_bid, &clock, ts::ctx(&mut ts));
+        transfer::public_transfer(item, SELLER_ADDR);
+    };
 
-        {
-            ts::next_tx(&mut ts, SELLER_ADDR);
+    {
+        ts::next_tx(&mut ts, SELLER_ADDR);
 
-            let auction = ts::take_shared(&ts);
-            add_2fa_token(&mut auction, 123456, ts::ctx(&mut ts)); // Adding a valid 2FA token
-            ts::return_shared(auction);
-        };
+        let auction = ts::take_shared(&ts);
+        add_2fa_token(&mut auction, 123456, ts::ctx(&mut ts)); // Adding a valid 2FA token
+        ts::return_shared(auction);
+    };
 
-        {
-            ts::next_tx(&mut ts, BIDDER1_ADDR);
+    // Scenario 2: Place bids and finalize auction with valid 2FA token
+    {
+        ts::next_tx(&mut ts, BIDDER1_ADDR);
 
-            let auction = ts::take_shared(&ts);
-            let bid_coin = coin::mint_for_testing<SUI>(8, ts::ctx(&mut ts));
-            let receipt = place_bid(&mut auction, bid_coin, &clock, ts::ctx(&mut ts));
-            transfer::public_transfer(receipt, BIDDER1_ADDR);
+        let auction = ts::take_shared(&ts);
+        let bid_coin = coin::mint_for_testing<SUI>(8, ts::ctx(&mut ts));
+        let receipt = place_bid(&mut auction, bid_coin, &clock, ts::ctx(&mut ts));
+        transfer::public_transfer(receipt, BIDDER1_ADDR);
 
-            ts::return_shared(auction);
-        };
+        ts::return_shared(auction);
+    };
 
-        {
-            ts::next_tx(&mut ts, BIDDER2_ADDR);
+    {
+        ts::next_tx(&mut ts, BIDDER2_ADDR);
 
-            let auction = ts::take_shared(&ts);
-            let bid_coin = coin::mint_for_testing<SUI>(14, ts::ctx(&mut ts));
-            let receipt = place_bid(&mut auction, bid_coin, &clock, ts::ctx(&mut ts));
-            transfer::public_transfer(receipt, BIDDER2_ADDR);
+        let auction = ts::take_shared(&ts);
+        let bid_coin = coin::mint_for_testing<SUI>(14, ts::ctx(&mut ts));
+        let receipt = place_bid(&mut auction, bid_coin, &clock, ts::ctx(&mut ts));
+        transfer::public_transfer(receipt, BIDDER2_ADDR);
 
-            ts::return_shared(auction);
-        };
+        ts::return_shared(auction);
+    };
 
-        {
-            ts::next_tx(&mut ts, SELLER_ADDR);
+    {
+        ts::next_tx(&mut ts, SELLER_ADDR);
 
-            clock::increment_for_testing(&mut clock, 21_000); // Advance time by 21 seconds
-            let auction: Auction = ts::take_shared(&ts);
-            let item: VintageItem = ts::take_from_sender(&ts);
-            let final_price = finalize_auction(item, &mut auction, 123456, &clock, ts::ctx(&mut ts)); // Provide the 2FA token
-            transfer::public_transfer(final_price, SELLER_ADDR);
+        clock::increment_for_testing(&mut clock, 21_000); // Advance time by 21 seconds
+        let auction: Auction = ts::take_shared(&ts);
+        let item: VintageItem = ts::take_from_sender(&ts);
+        let final_price = finalize_auction(item, &mut auction, 123456, &clock, ts::ctx(&mut ts)); // Provide the valid 2FA token
+        transfer::public_transfer(final_price, SELLER_ADDR);
 
-            ts::return_shared(auction);
-        };
+        ts::return_shared(auction);
+    };
 
-        {
-            ts::next_tx(&mut ts, BIDDER1_ADDR);
+    // Scenario 3: No bids placed, auction should finalize without any transfers
+    {
+        ts::next_tx(&mut ts, SELLER_ADDR);
 
-            let auction: Auction = ts::take_shared(&ts);
-            let receipt: BidReceipt = ts::take_from_sender(&ts);
-            let refund = claim_refund(&mut auction, receipt, ts::ctx(&mut ts));
-            transfer::public_transfer(refund, BIDDER1_ADDR);
+        let title = b"Antique Camera";
+        let description = b"Early 1900s Edition Camera";
+        let minimum_bid: u64 = 10;
 
-            ts::return_shared(auction);
-        };
+        let item = create_vintage_item(title, description, minimum_bid, &clock, ts::ctx(&mut ts));
+        transfer::public_transfer(item, SELLER_ADDR);
 
-        clock::destroy_for_testing(clock);
-        ts::end(ts);
-    }
+        ts::next_tx(&mut ts, SELLER_ADDR);
+
+        let auction = ts::take_shared(&ts);
+        add_2fa_token(&mut auction, 654321, ts::ctx(&mut ts)); // Adding another valid 2FA token
+        ts::return_shared(auction);
+
+        ts::next_tx(&mut ts, SELLER_ADDR);
+
+        clock::increment_for_testing(&mut clock, 21_000); // Advance time by 21 seconds
+        let auction: Auction = ts::take_shared(&ts);
+        let item: VintageItem = ts::take_from_sender(&ts);
+        let final_price = finalize_auction(item, &mut auction, 654321, &clock, ts::ctx(&mut ts)); // No bids placed
+        assert!(coin::value(&final_price) == 0, NO_BIDS_RECEIVED); // Ensure no final price is set
+
+        ts::return_shared(auction);
+    };
+
+    // Scenario 4: Invalid 2FA token should prevent finalizing auction
+    {
+        ts::next_tx(&mut ts, SELLER_ADDR);
+
+        let title = b"Vintage Radio";
+        let description = b"1940s Radio";
+        let minimum_bid: u64 = 15;
+
+        let item = create_vintage_item(title, description, minimum_bid, &clock, ts::ctx(&mut ts));
+        transfer::public_transfer(item, SELLER_ADDR);
+
+        ts::next_tx(&mut ts, SELLER_ADDR);
+
+        let auction = ts::take_shared(&ts);
+        add_2fa_token(&mut auction, 111111, ts::ctx(&mut ts)); // Add a valid 2FA token
+        ts::return_shared(auction);
+
+        ts::next_tx(&mut ts, BIDDER1_ADDR);
+
+        let auction = ts::take_shared(&ts);
+        let bid_coin = coin::mint_for_testing<SUI>(20, ts::ctx(&mut ts));
+        let receipt = place_bid(&mut auction, bid_coin, &clock, ts::ctx(&mut ts));
+        transfer::public_transfer(receipt, BIDDER1_ADDR);
+
+        ts::return_shared(auction);
+
+        ts::next_tx(&mut ts, SELLER_ADDR);
+
+        clock::increment_for_testing(&mut clock, 21_000); // Advance time by 21 seconds
+        let auction = ts::take_shared(&ts);
+        let item = ts::take_from_sender(&ts);
+        // Attempt to finalize auction with invalid 2FA token
+        let invalid_token: u64 = 222222; // Invalid token
+        assert!(finalize_auction(item, &mut auction, invalid_token, &clock, ts::ctx(&mut ts)) == INVALID_2FA_TOKEN); // Expect failure
+    };
+
+    // Scenario 5: Multiple 2FA token usage (valid token reuse should fail)
+    {
+        ts::next_tx(&mut ts, SELLER_ADDR);
+
+        let auction = ts::take_shared(&ts);
+        let item = ts::take_from_sender(&ts);
+        clock::increment_for_testing(&mut clock, 21_000); // Advance time by 21 seconds
+
+        // Finalize auction with valid token for the first time
+        let final_price = finalize_auction(item, &mut auction, 111111, &clock, ts::ctx(&mut ts));
+        transfer::public_transfer(final_price, SELLER_ADDR);
+
+        ts::return_shared(auction);
+
+        // Try to finalize the auction again with the same token (should fail)
+        assert!(finalize_auction(item, &mut auction, 111111, &clock, ts::ctx(&mut ts)) == INVALID_2FA_TOKEN); // Should fail because token was already used
+    };
+
+    // Scenario 6: Cancel auction with active bids (should fail)
+    {
+        ts::next_tx(&mut ts, SELLER_ADDR);
+
+        let title = b"Vintage Car";
+        let description = b"Classic 1960s Car";
+        let minimum_bid: u64 = 50;
+
+        let item = create_vintage_item(title, description, minimum_bid, &clock, ts::ctx(&mut ts));
+        transfer::public_transfer(item, SELLER_ADDR);
+
+        ts::next_tx(&mut ts, SELLER_ADDR);
+
+        let auction = ts::take_shared(&ts);
+        add_2fa_token(&mut auction, 999999, ts::ctx(&mut ts)); // Add valid 2FA token
+        ts::return_shared(auction);
+
+        ts::next_tx(&mut ts, BIDDER1_ADDR);
+
+        let auction = ts::take_shared(&ts);
+        let bid_coin = coin::mint_for_testing<SUI>(55, ts::ctx(&mut ts));
+        let receipt = place_bid(&mut auction, bid_coin, &clock, ts::ctx(&mut ts));
+        transfer::public_transfer(receipt, BIDDER1_ADDR);
+
+        ts::return_shared(auction);
+
+        ts::next_tx(&mut ts, SELLER_ADDR);
+
+        // Attempt to cancel auction with an active bid (should fail)
+        let auction = ts::take_shared(&ts);
+        assert!(cancel_auction(&mut auction, 999999, ts::ctx(&mut ts)) == AUCTION_ACTIVE); // Should fail because there is an active bid
+    };
+
+    clock::destroy_for_testing(clock);
+    ts::end(ts);
 }
